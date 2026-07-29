@@ -1,0 +1,17 @@
+[project]
+name = "ronolm"
+version = "0.1.0"
+description = "Memory-first conversational AI runtime"
+requires-python = ">=3.10"
+dependencies = [
+    "sentence-transformers",
+]
+
+[project.optional-dependencies]
+voice = [
+    "faster-whisper",
+    "sounddevice",
+]
+
+[tool.setuptools]
+packages = ["ronolm", "ronolm.audio"]

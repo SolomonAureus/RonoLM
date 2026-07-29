@@ -1,0 +1,55 @@
+# Python bytecode and test/tool caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# Python environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging and editable-install output
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# RonoLM runtime state
+V1/data/*.sqlite*
+V1/tmp/
+
+# Downloaded local voice models. The wildcard also catches accidental
+# terminal-control-character variants such as "voices<escape>[C".
+V1/voices*/
+
+# Local agent/editor/OS state
+/.agents/
+/.codex/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Logs and interrupted temporary downloads
+*.log
+*.tmp
+*.part

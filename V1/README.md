@@ -25,6 +25,7 @@ Ollama, and episode-update pipeline.
 Install the optional local audio dependencies:
 
 ```bash
+sudo apt install libportaudio2
 python3 -m pip install -e '.[voice]'
 ```
 
@@ -40,8 +41,10 @@ set +a
 python3 -m ronolm.voice_cli
 ```
 
-Push Enter once to start a turn and again to stop recording. Voice commands are
-`/text`, `/mute`, `/unmute`, `/repeat`, `/debug`, and `/quit`.
+Push Enter once to start a turn and again to stop recording. The conversation
+view stays minimal: input prompt, live listening meter, transcription status,
+heard text, and the RonoLM response. Voice commands are `/text`, `/mute`,
+`/unmute`, `/repeat`, `/mic`, `/debug`, `/quit`, and `/exit`.
 
 Run without speech playback:
 

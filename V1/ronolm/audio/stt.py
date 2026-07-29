@@ -51,6 +51,7 @@ class FasterWhisperTranscriber:
         self.model_name = model_name
         self.device = device
         self.compute_type = compute_type
+        self._model_class = WhisperModel
         try:
             self._model = WhisperModel(
                 model_name,
@@ -63,59 +64,55 @@ class FasterWhisperTranscriber:
                     f"Could not initialize faster-whisper model "
                     f"{model_name!r} on {device}: {exc}"
                 ) from exc
-            warnings.warn(
-                "CUDA faster-whisper initialization failed; falling back "
-                f"to CPU int8. Original error: {exc}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            try:
-                self._model = WhisperModel(
-                    model_name,
-                    device="cpu",
-                    compute_type="int8",
-                )
-            except Exception as cpu_exc:
-                raise STTError(
-                    "Could not initialize faster-whisper on CUDA or CPU: "
-                    f"{cpu_exc}"
-                ) from cpu_exc
-            self.device = "cpu"
-            self.compute_type = "int8"
+            self._fall_back_to_cpu(exc, phase="initialization")
 
-    def transcribe(self, audio_path: str | Path) -> dict[str, Any]:
-        path = Path(audio_path)
-        if not path.is_file():
-            raise STTError(f"Audio file does not exist: {path}")
+    def _fall_back_to_cpu(self, error: Exception, *, phase: str) -> None:
+        warnings.warn(
+            f"CUDA faster-whisper {phase} failed; falling back to CPU int8. "
+            f"Original error: {error}",
+            RuntimeWarning,
+            stacklevel=3,
+        )
         try:
-            raw_segments, info = self._model.transcribe(
-                str(path),
-                beam_size=1,
-                vad_filter=True,
-                condition_on_previous_text=False,
+            self._model = self._model_class(
+                self.model_name,
+                device="cpu",
+                compute_type="int8",
             )
-            segments = []
-            text_parts = []
-            for segment in raw_segments:
-                text = str(segment.text).strip()
-                if not text:
-                    continue
-                text_parts.append(text)
-                segments.append(
-                    {
-                        "id": getattr(segment, "id", None),
-                        "start": float(segment.start),
-                        "end": float(segment.end),
-                        "text": text,
-                        "avg_logprob": getattr(segment, "avg_logprob", None),
-                        "no_speech_prob": getattr(
-                            segment, "no_speech_prob", None
-                        ),
-                    }
-                )
-        except Exception as exc:
-            raise STTError(f"Speech transcription failed: {exc}") from exc
+        except Exception as cpu_exc:
+            raise STTError(
+                "Could not initialize faster-whisper CPU fallback: "
+                f"{cpu_exc}"
+            ) from cpu_exc
+        self.device = "cpu"
+        self.compute_type = "int8"
 
+    def _transcribe_once(self, path: Path) -> dict[str, Any]:
+        raw_segments, info = self._model.transcribe(
+            str(path),
+            beam_size=1,
+            vad_filter=True,
+            condition_on_previous_text=False,
+        )
+        segments = []
+        text_parts = []
+        for segment in raw_segments:
+            text = str(segment.text).strip()
+            if not text:
+                continue
+            text_parts.append(text)
+            segments.append(
+                {
+                    "id": getattr(segment, "id", None),
+                    "start": float(segment.start),
+                    "end": float(segment.end),
+                    "text": text,
+                    "avg_logprob": getattr(segment, "avg_logprob", None),
+                    "no_speech_prob": getattr(
+                        segment, "no_speech_prob", None
+                    ),
+                }
+            )
         duration = getattr(info, "duration", None)
         if duration is None:
             duration = max(
@@ -127,6 +124,27 @@ class FasterWhisperTranscriber:
             "duration": float(duration),
             "segments": segments,
         }
+
+    def transcribe(self, audio_path: str | Path) -> dict[str, Any]:
+        path = Path(audio_path)
+        if not path.is_file():
+            raise STTError(f"Audio file does not exist: {path}")
+        try:
+            return self._transcribe_once(path)
+        except Exception as exc:
+            if self.device != "cuda":
+                raise STTError(
+                    f"Speech transcription failed: {exc}"
+                ) from exc
+            cuda_error = exc
+
+        self._fall_back_to_cpu(cuda_error, phase="transcription")
+        try:
+            return self._transcribe_once(path)
+        except Exception as cpu_exc:
+            raise STTError(
+                f"Speech transcription failed on CPU fallback: {cpu_exc}"
+            ) from cpu_exc
 
 
 @lru_cache(maxsize=4)

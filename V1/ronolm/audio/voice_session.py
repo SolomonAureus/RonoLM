@@ -4,6 +4,8 @@ from typing import Any
 from ronolm.audio.recorder import (
     MIN_USABLE_DURATION_SECONDS,
     AudioRecordingError,
+    InputDeviceInfo,
+    get_input_device_info,
     record_audio,
 )
 from ronolm.audio.stt import FasterWhisperTranscriber, STTError, get_transcriber
@@ -20,12 +22,14 @@ class VoiceSession:
         *,
         tts_enabled: bool = True,
         transcriber: FasterWhisperTranscriber | None = None,
+        microphone_info: InputDeviceInfo | None = None,
     ) -> None:
         self.thread_id = thread_id
         self.config = config
         self.tts_enabled = tts_enabled
         self.muted = not tts_enabled
         self.last_assistant_response: str | None = None
+        self.microphone_info = microphone_info
 
         if tts_enabled:
             validate_piper_config(config)
@@ -50,13 +54,17 @@ class VoiceSession:
             if recording.duration < MIN_USABLE_DURATION_SECONDS:
                 print("No usable speech detected.")
                 return None
+            print(
+                f"[TRANSCRIBING] Captured {recording.duration:.1f}s of "
+                f"audio (peak {recording.peak_level * 100:.1f}%)."
+            )
             transcription = self.transcriber.transcribe(recording.path)
             transcript = str(transcription.get("text") or "").strip()
             if not transcript:
                 print("No usable speech detected.")
                 return None
 
-            print(f"\nYou said:\n{transcript}\n")
+            print(f"\n[HEARD] You said:\n{transcript}\n")
             metadata: dict[str, Any] = {
                 "stt_provider": "faster_whisper",
                 "stt_model": self.config.stt_model,
@@ -119,4 +127,17 @@ class VoiceSession:
             print("TTS playback is muted.")
             return False
         self._speak_response(self.last_assistant_response)
+        return True
+
+    def print_microphone_status(self) -> bool:
+        try:
+            self.microphone_info = get_input_device_info()
+        except AudioRecordingError as exc:
+            print(f"[MIC ERROR] {exc}")
+            return False
+        print(
+            f"[MIC READY] {self.microphone_info.name} "
+            f"({self.microphone_info.max_input_channels} input channel(s), "
+            f"default {self.microphone_info.default_sample_rate:.0f} Hz)"
+        )
         return True

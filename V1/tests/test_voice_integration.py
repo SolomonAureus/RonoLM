@@ -1,11 +1,20 @@
+import contextlib
+import io
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import ronolm.db as db
-from ronolm.audio.recorder import RecordedAudio
-from ronolm.audio.stt import _resolved_runtime
+from ronolm.audio import recorder
+from ronolm.audio.recorder import (
+    AudioRecordingError,
+    InputDeviceInfo,
+    RecordedAudio,
+    _format_level_meter,
+)
+from ronolm.audio.stt import FasterWhisperTranscriber, _resolved_runtime
 from ronolm.audio.tts import TTSError, speak_text, validate_piper_config
 from ronolm.audio.voice_session import VoiceSession
 from ronolm.chat_service import process_user_message
@@ -113,10 +122,91 @@ class ChatServiceIntegrationTests(unittest.TestCase):
 
 
 class VoiceAdapterTests(unittest.TestCase):
+    def test_cuda_transcription_failure_falls_back_to_cpu(self) -> None:
+        model_devices: list[str] = []
+
+        class FakeInfo:
+            duration = 1.0
+            language = "en"
+
+        class FakeSegment:
+            id = 0
+            start = 0.0
+            end = 1.0
+            text = "fallback works"
+            avg_logprob = -0.1
+            no_speech_prob = 0.0
+
+        class FakeWhisperModel:
+            def __init__(
+                self, model_name, *, device, compute_type
+            ) -> None:
+                del model_name, compute_type
+                self.device = device
+                model_devices.append(device)
+
+            def transcribe(self, audio_path, **options):
+                del audio_path, options
+                if self.device == "cuda":
+                    def failed_segments():
+                        raise RuntimeError("libcublas.so.12 not found")
+                        yield
+
+                    return failed_segments(), FakeInfo()
+                return iter([FakeSegment()]), FakeInfo()
+
+        fake_module = types.SimpleNamespace(
+            WhisperModel=FakeWhisperModel
+        )
+        with tempfile.NamedTemporaryFile(suffix=".wav") as audio_file:
+            with (
+                patch.dict(
+                    "sys.modules", {"faster_whisper": fake_module}
+                ),
+                self.assertWarnsRegex(
+                    RuntimeWarning, "falling back to CPU int8"
+                ),
+            ):
+                transcriber = FasterWhisperTranscriber(
+                    "small", "cuda", "float16"
+                )
+                result = transcriber.transcribe(audio_file.name)
+
+        self.assertEqual(model_devices, ["cuda", "cpu"])
+        self.assertEqual(transcriber.device, "cpu")
+        self.assertEqual(transcriber.compute_type, "int8")
+        self.assertEqual(result["text"], "fallback works")
+
+    def test_missing_native_portaudio_has_install_instruction(self) -> None:
+        real_import = __import__
+
+        def import_without_portaudio(name, *args, **kwargs):
+            if name == "sounddevice":
+                raise OSError("PortAudio library not found")
+            return real_import(name, *args, **kwargs)
+
+        with (
+            patch("builtins.__import__", side_effect=import_without_portaudio),
+            self.assertRaisesRegex(
+                AudioRecordingError, "sudo apt install libportaudio2"
+            ),
+        ):
+            recorder._load_sounddevice()
+
+    def test_microphone_meter_visibly_responds_to_audio_level(self) -> None:
+        silent = _format_level_meter(0.0)
+        audible = _format_level_meter(0.1)
+
+        self.assertEqual(silent.count("█"), 0)
+        self.assertGreater(audible.count("█"), silent.count("█"))
+
     def test_voice_cli_commands_delegate_to_session(self) -> None:
         session = unittest.mock.Mock()
         session.config = load_voice_config({})
         session.thread_id = "thread_commands"
+        session.microphone_info = InputDeviceInfo(
+            "Test microphone", 1, 48_000
+        )
         session.unmute.return_value = True
 
         with patch(
@@ -128,6 +218,7 @@ class VoiceAdapterTests(unittest.TestCase):
                 "/mute",
                 "/unmute",
                 "/repeat",
+                "/mic",
                 "/debug",
                 "/quit",
             ],
@@ -139,6 +230,15 @@ class VoiceAdapterTests(unittest.TestCase):
         session.mute.assert_called_once_with()
         session.unmute.assert_called_once_with()
         session.repeat.assert_called_once_with()
+        session.print_microphone_status.assert_called_once_with()
+
+    def test_exit_is_an_alias_for_quit(self) -> None:
+        session = unittest.mock.Mock()
+
+        with patch("builtins.input", return_value="/exit"):
+            _run_loop(session)
+
+        session.process_voice_turn.assert_not_called()
 
     def test_voice_session_routes_transcript_and_deletes_input_audio(
         self,
@@ -177,10 +277,17 @@ class VoiceAdapterTests(unittest.TestCase):
                     "ronolm.audio.voice_session.process_user_message",
                     return_value="voice response",
                 ) as process,
+                contextlib.redirect_stdout(io.StringIO()) as output,
             ):
                 response = session.process_voice_turn()
 
             self.assertEqual(response, "voice response")
+            rendered = output.getvalue()
+            self.assertIn("[TRANSCRIBING]", rendered)
+            self.assertIn("[HEARD]", rendered)
+            self.assertIn("RonoLM:\nvoice response", rendered)
+            self.assertNotIn("[THINKING]", rendered)
+            self.assertNotIn("[DONE]", rendered)
             self.assertFalse(audio_path.exists())
             process.assert_called_once()
             arguments = process.call_args.kwargs
